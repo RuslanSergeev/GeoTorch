@@ -1,10 +1,18 @@
-from typing import Union, List
+from typing import (
+    Union, 
+    List, 
+    Tuple, 
+    cast, 
+    Dict, 
+    Callable, 
+    Optional
+)
 import geopandas as gpd
-import pandas as pd
 import numpy as np
 import hashlib
 import torch
 import rasterio
+from rasterstats import zonal_stats
 from rasterio.features import rasterize
 
 PATH_GRID = "Noto_grid.gpkg"
@@ -31,14 +39,13 @@ class DensityEstimator(torch.nn.Module):
             in_channels=1,
             out_channels=1,
             kernel_size=kernel_size,
-            padding=padding
+            padding=padding,
+            bias=False
         )
         average_filter = self.create_circular_kernel(kernel_size, picture_resolution)
         conv_1.weight.data = average_filter
         conv_1.weight.requires_grad = False
         # Manually set the bias to zero and freeze it
-        conv_1.bias.data = torch.zeros(1)
-        conv_1.bias.requires_grad = False
 
         self.net.add_module("conv_1", conv_1)
 
@@ -52,15 +59,14 @@ class DensityEstimator(torch.nn.Module):
                 in_channels=1,
                 out_channels=1,
                 kernel_size=kernel_size,
-                padding=padding
+                padding=padding,
+                bias=False
             )
             # Manually set the kernel to an average filter: 1 / (kernel_size^2)
             average_filter = torch.ones(1, 1, kernel_size, kernel_size) / (kernel_size ** 2)
             conv_2.weight.data = average_filter
             conv_2.weight.requires_grad = False
             # Manually set the bias to zero and freeze it
-            conv_2.bias.data = torch.zeros(1)
-            conv_2.bias.requires_grad = False
             self.net.add_module("conv_2", conv_2)
 
     def forward(self, x):
@@ -89,25 +95,48 @@ class DensityEstimator(torch.nn.Module):
         return torch.from_numpy(kernel / area_m2)[None, None, :, :].to(torch.float32)
 
 
-def read_raster_into_tensor(
-    raster_path: str,
+def filter_bands(
+    bands_names: List[str],
+    bands_filter: List[str]
+) -> List[str]:
+    if not bands_filter:
+        return bands_names
+    filtered_bands = list(filter(lambda x: x in bands_names, bands_filter))
+    if len(filtered_bands) != len(bands_filter):
+        not_present_bands = set(bands_filter) - set(filtered_bands)
+        raise ValueError(f"Bands {not_present_bands} not found in the raster")
+    return filtered_bands
+
+
+def filter_tensor_channels(
+    tensor: torch.Tensor,
+    bands_names: List[str],
+    bands_filter: List[str] = []
 ) -> torch.Tensor:
+    filtered_bands = filter_bands(bands_names, bands_filter)
+    filtered_channels = [bands_names.index(band) for band in filtered_bands]
+    return tensor[:, filtered_channels, :, :]
+
+
+def read_raster_into_tensor(
+    raster_path: str
+) -> Tuple[torch.Tensor, List[str], dict]:
     with rasterio.open(raster_path) as src:
         meta = src.meta
-        bands_names = src.descriptions
+        bands = list(src.descriptions)
         tensor = [torch.from_numpy(src.read(i)) for i in range(1, src.count + 1)]
         tensor = torch.stack(tensor, dim=0).unsqueeze(0).to(torch.float32)
-    return tensor, bands_names, meta
+    return tensor, bands, meta
 
 
 def write_tensor_to_raster(
-    raster_path: str,
     tensor: torch.Tensor,
+    raster_path: str,
     *,
     dtype: str = "float32",
     meta: dict,
     bands_names: List[str] = [],
-):
+) -> None:
     # switch datatype to float8
     if bands_names and len(bands_names) != tensor.shape[1]:
         raise ValueError("Bands names should be the same as number of channels")
@@ -119,16 +148,24 @@ def write_tensor_to_raster(
             )
         if bands_names:
             dst.descriptions = bands_names
+        else:
+            dst.descriptions = [None] * tensor.shape[1]
 
 
 def estimate_density(
     raster_input_path: str,
     raster_output_path: str,
     density_buffer: int,
-    smoothing_buffer: int = 0
+    smoothing_buffer: int = 0,
+    bands_filter: List[str] = []
 ):
     # read the raster file
     tensor, bands_names, meta = read_raster_into_tensor(raster_input_path)
+
+    if bands_filter:
+        tensor = filter_tensor_channels(
+            tensor, bands_names, bands_filter
+        )
 
     # create the density estimator
     density_estimator = DensityEstimator(
@@ -146,14 +183,14 @@ def estimate_density(
 
     # write the density to a raster file
     write_tensor_to_raster(
-        raster_output_path,
         density,
+        raster_output_path,
         meta=meta,
         bands_names=bands_names
     )
 
 
-def write_centroids_to_raster(
+def rasterize_geodataframe(
     gdf: gpd.GeoDataFrame,
     *,
     cell_size: int = 4,
@@ -162,6 +199,7 @@ def write_centroids_to_raster(
     rasterize_centroids: bool = True,
     centroid_value: int = 1,
     centroid_name: str = "centroid_",
+    fill: float = 0
 ):
     if isinstance(gdf, str):
         gdf = gpd.read_file(gdf)
@@ -175,7 +213,7 @@ def write_centroids_to_raster(
         features_list.append(centroid_name)
 
     bounds = gdf.total_bounds
-    transform = rasterio.transform.from_origin(
+    transform = rasterio.transform.from_origin( #type: ignore
         west = bounds[0], 
         north = bounds[3],
         xsize = cell_size, 
@@ -196,11 +234,12 @@ def write_centroids_to_raster(
 
     with rasterio.open(raster_path, 'w', **out_meta) as dst:
         for band, feature in enumerate(features_list, start=1):
+            shapes = [(geom, value) for geom, value in zip(gdf.geometry, gdf[feature])]
             out_image = rasterize(
-                [(geom, value) for geom, value in zip(gdf.geometry, gdf[feature])],
+                shapes,
                 out_shape=(height, width),
                 transform=transform,
-                fill=0
+                fill=fill, #type: ignore
             )
             dst.write(out_image, band)
         # describe the bands
@@ -209,32 +248,39 @@ def write_centroids_to_raster(
 
 # compute zonal stats of a raster 
 # using a geo-dataframe as zones
-def compute_zonal_statistics(
+def get_zonal_statistics(
     raster_path: str,
     gdf: Union[gpd.GeoDataFrame, str],
     *,
     stats: List[str] = ["mean"],
+    add_stats: Dict[str, Callable] = {},
+    band: int = 1,
+    nodata: Optional[float] = None
 ) -> gpd.GeoDataFrame:
     # read the raster file
-    with rasterio.open(raster_path) as src:
-        raster = src.read(1)
-        meta = src.meta
     if isinstance(gdf, str):
         gdf = gpd.read_file(gdf)
-    gdf = gdf.copy()
-    gdf.to_crs(meta["crs"], inplace=True)
-
-    # compute zonal statistics
-    stats = rasterio.features.zonal_stats(
-        gdf.geometry,
-        raster,
-        affine=meta["transform"],
-        stats=stats
-    )
-    stats = pd.DataFrame(stats, index=gdf.index)
-    gdf = pd.concat([gdf, stats], axis=1)
-    return gdf
-
+    else:
+        gdf = gdf.copy()
+    gdf = cast(gpd.GeoDataFrame, gdf)
+    origin_crs = gdf.crs
+    with rasterio.open(raster_path) as src:
+        meta = src.meta
+        gdf.to_crs(meta["crs"], inplace=True)
+        stats_out = zonal_stats(
+            gdf, 
+            src.read(band), 
+            stats=stats,
+            band=band,
+            add_stats=add_stats,
+            affine=src.transform,
+            nodata=nodata
+        )
+    stats_out = gpd.GeoDataFrame(
+        data=stats_out, 
+        geometry = gdf.geometry
+    ).to_crs(origin_crs)
+    return cast(gpd.GeoDataFrame, stats_out)
 
 
 def create_centroid_identifier(
@@ -254,114 +300,3 @@ def create_centroid_identifier(
 
     bf_dataset[id_column_name] = centroids.apply(hash_sum)
     return bf_dataset
-
-
-def get_density_within_buffer(
-    gdf_objects: gpd.GeoDataFrame,
-    buffer_radius: float,
-    id_column_name: str = "object_id",
-    density_column_name: str = "density"
-) -> gpd.GeoDataFrame:
-
-    utm_crs = gdf_objects.estimate_utm_crs()
-
-    # prepare the hash IDs collection
-    gdf_buffers = gdf_objects.copy()
-    gdf_buffers.to_crs(utm_crs, inplace=True)
-    gdf_buffers = create_centroid_identifier(
-        gdf_buffers,
-        id_column_name=id_column_name
-    )
-
-    gdf_ids = gdf_buffers.copy()
-    gdf_ids.to_crs(utm_crs, inplace=True)
-    gdf_ids.geometry = gdf_ids.centroid
-
-    # create a buffer around each building
-    gdf_buffers["geometry"] = gdf_buffers.buffer(buffer_radius)
-
-    # count the number of objects in each buffer
-    sjoin = gpd.sjoin(
-        gdf_ids, gdf_buffers, how='inner', predicate='within',
-    )
-    sizes = sjoin.groupby(id_column_name).count()
-    sizes[id_column_name] = sizes.index.copy()
-    sizes[density_column_name] = sizes["geometry"]
-    sjoin = sjoin.merge(
-        sizes[[id_column_name, density_column_name]], on=id_column_name
-    )
-
-    gdf_ids = gdf_ids.merge(
-        sjoin[[id_column_name, density_column_name]], on=id_column_name
-    )
-    return gdf_ids
-
-
-def get_density(
-    gdf_objects: gpd.GeoDataFrame,
-    gdf_cells: gpd.GeoDataFrame,
-    id_column_name: str = "object_id",
-    density_column_name: str = "density"
-) -> gpd.GeoDataFrame:
-    # prepare the hash IDs collection
-    gdf_ids = gdf_objects.copy()
-    gdf_ids = create_centroid_identifier(
-        gdf_ids,
-        id_column_name=id_column_name
-    )
-
-    gdf_cells = gdf_cells.copy()
-    gdf_cells["patch_id"] = gdf_cells.index.copy()
-
-    # simplify the geometries to centroids
-    geometry_backup = gdf_ids.geometry.copy()
-    gdf_ids = gdf_ids.set_geometry(gdf_ids.centroid)
-
-    # count the number of objects in each cell
-    sjoin = gpd.sjoin(
-        gdf_ids, gdf_cells, how='right', predicate='within'
-    )
-    sizes = sjoin.groupby("patch_id").count()
-    sizes["patch_id"] = sizes.index.copy()
-    sizes[density_column_name] = sizes[id_column_name]
-    sjoin = sjoin.merge(
-        sizes[["patch_id", density_column_name]], on="patch_id"
-    )
-
-    gdf_ids = gdf_ids.merge(
-        sjoin[[id_column_name, density_column_name]], on=id_column_name
-    )
-    gdf_ids = gdf_ids.set_geometry(geometry_backup)
-    return gdf_ids
-
-
-def filter_density(
-    gdf_objects: gpd.GeoDataFrame,
-    gdf_cells: gpd.GeoDataFrame,
-    num_min: int = 5,
-    num_max: int = 15
-) -> gpd.GeoDataFrame:
-    # prepare the hash IDs collection
-    gdf_ids = gdf_objects.copy()
-    gdf_ids = create_centroid_identifier(gdf_ids)
-
-    # simplify the geometries to centroids
-    geometry_backup = gdf_ids.geometry.copy()
-    gdf_ids = gdf_ids.set_geometry(gdf_ids.centroid)
-
-    # filter
-    right_join = gpd.sjoin(gdf_ids, gdf_cells, how='right', predicate='within')
-    sizes = right_join.groupby("id").size()
-    sizes = sizes.loc[(sizes >= num_min) & (sizes < num_max)]
-    right_join = right_join.loc[right_join["id"].isin(sizes.index)]
-    gdf_ids = gdf_ids.loc[gdf_ids.building_id.isin(right_join.building_id)]
-    gdf_ids = gdf_ids.set_geometry(geometry_backup)
-    return gdf_ids
-
-
-gdf_cells = gpd.read_file(PATH_GRID)
-gdf_buildings = gpd.read_file(PATH_BUILDINGS)
-gdf_low_density = filter_density(gdf_buildings, gdf_cells)
-
-
-

@@ -15,10 +15,6 @@ import rasterio
 from rasterstats import zonal_stats
 from rasterio.features import rasterize
 
-PATH_GRID = "Noto_grid.gpkg"
-PATH_BUILDINGS = "CORRECTED_japan_noto_bfgt_20240801.gpkg"
-PATH_LOW_DENSITY = "Noto_BF_low_density.gpkg"
-
 
 class DensityEstimator(torch.nn.Module):
     def __init__(self,

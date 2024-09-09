@@ -42,7 +42,9 @@ class DensityEstimator(torch.nn.Module):
             padding=padding,
             bias=False
         )
-        average_filter = self.create_circular_kernel(kernel_size, picture_resolution)
+        average_filter = self.create_circular_kernel(
+            kernel_size, picture_resolution
+        )
         conv_1.weight.data = average_filter
         conv_1.weight.requires_grad = False
         # Manually set the bias to zero and freeze it
@@ -193,7 +195,7 @@ def estimate_density(
 def rasterize_geodataframe(
     gdf: gpd.GeoDataFrame,
     *,
-    cell_size: int = 4,
+    pixel_size_metters: int = 4,
     raster_path: str,
     features_list: List[str] = [],
     rasterize_centroids: bool = True,
@@ -216,11 +218,11 @@ def rasterize_geodataframe(
     transform = rasterio.transform.from_origin( #type: ignore
         west = bounds[0], 
         north = bounds[3],
-        xsize = cell_size, 
-        ysize = cell_size
+        xsize = pixel_size_metters, 
+        ysize = pixel_size_metters
     )
-    width = int((bounds[2] - bounds[0]) / cell_size)
-    height = int((bounds[3] - bounds[1]) / cell_size)
+    width = int((bounds[2] - bounds[0]) / pixel_size_metters)
+    height = int((bounds[3] - bounds[1]) / pixel_size_metters)
 
     out_meta = {
         "driver": "GTiff",
@@ -250,25 +252,26 @@ def rasterize_geodataframe(
 # using a geo-dataframe as zones
 def get_zonal_statistics(
     raster_path: str,
-    gdf: Union[gpd.GeoDataFrame, str],
+    gdf_input: Union[gpd.GeoDataFrame, str],
     *,
     stats: List[str] = ["mean"],
     add_stats: Dict[str, Callable] = {},
     band: int = 1,
-    nodata: Optional[float] = None
+    nodata: Optional[float] = None,
+    gdf_output_path: Optional[str] = None
 ) -> gpd.GeoDataFrame:
     # read the raster file
-    if isinstance(gdf, str):
-        gdf = gpd.read_file(gdf)
+    if isinstance(gdf_input, str):
+        gdf_input = gpd.read_file(gdf_input)
     else:
-        gdf = gdf.copy()
-    gdf = cast(gpd.GeoDataFrame, gdf)
-    origin_crs = gdf.crs
+        gdf_input = gdf_input.copy()
+    gdf_input = cast(gpd.GeoDataFrame, gdf_input)
+    origin_crs = gdf_input.crs
     with rasterio.open(raster_path) as src:
         meta = src.meta
-        gdf.to_crs(meta["crs"], inplace=True)
+        gdf_input.to_crs(meta["crs"], inplace=True)
         stats_out = zonal_stats(
-            gdf, 
+            gdf_input, 
             src.read(band), 
             stats=stats,
             band=band,
@@ -278,10 +281,12 @@ def get_zonal_statistics(
         )
     stats_out = gpd.GeoDataFrame(
         data=stats_out, 
-        geometry = gdf.geometry
+        geometry = gdf_input.geometry
     ).to_crs(origin_crs)
-    return cast(gpd.GeoDataFrame, stats_out)
-
+    stats_out = cast(gpd.GeoDataFrame, stats_out)
+    if gdf_output_path:
+        stats_out.to_file(gdf_output_path, driver="GPKG")
+    return stats_out
 
 def create_centroid_identifier(
     bf_dataset: gpd.GeoDataFrame,

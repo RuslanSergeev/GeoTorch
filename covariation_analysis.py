@@ -1,6 +1,7 @@
 import numpy as np
 import pandas as pd
 from sklearn.metrics import confusion_matrix
+from typing import List
 
 
 def categorize_data(
@@ -27,13 +28,13 @@ def get_metrics(
     data: pd.DataFrame,
     category_column: str,
     num_categories: int,
-):
-    label_name = category_column
-    data, labels = categorize_data(data, category_column, num_categories, label_name)
+) -> pd.DataFrame:
+    out_column = category_column + "_categorized"
+    data, labels = categorize_data(data, category_column, num_categories, out_column)
     metrics = []
     for label in labels:
         try:
-            sub_data = data.loc[data[label_name] == label]
+            sub_data = data.loc[data[out_column] == label]
             TN, FP, FN, TP = get_CM(sub_data).ravel()
             if TP + FN != 0:
                 sensitivity = TP / (TP + FN)
@@ -44,12 +45,33 @@ def get_metrics(
             else:
                 specificity = 0
             metrics.append({
-                label_name: label,
+                category_column: label,
                 "num_samples": len(sub_data),
                 "sensitivity": sensitivity,
                 "specificity": specificity,
-                "balanced_accuracy": (sensitivity + specificity) / 2,
+                "balanced_accuracy": (sensitivity + specificity) / 2,within each bin was performed.
             })
         except Exception as e:
             print(f"Error: {e}, {label=}")
     return pd.DataFrame(metrics)
+
+
+def get_correlation(
+    data: pd.DataFrame,
+    category_column: str,
+    num_categories: List[int],
+):
+    correlation = []
+    for num_category in num_categories:
+        metrics = get_metrics(data, category_column, num_category)
+        corr_matrix = metrics[[category_column, "sensitivity", "specificity", "balanced_accuracy"]].corr()
+        correlation.append(
+            {
+                "num_categories": num_category,
+                f"{category_column} * sensitivity": corr_matrix.loc[category_column, "sensitivity"],
+                f"{category_column} * specificity": corr_matrix.loc[category_column, "specificity"],
+                f"{category_column} * balanced_accuracy": corr_matrix.loc[category_column, "balanced_accuracy"],
+            }
+        )
+    return pd.DataFrame(correlation)
+

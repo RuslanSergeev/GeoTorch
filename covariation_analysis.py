@@ -44,12 +44,13 @@ def get_metrics(
                 specificity = TN / (TN + FP)
             else:
                 specificity = 0
+            balanced_accuracy = (sensitivity + specificity) / 2
             metrics.append({
                 category_column: label,
                 "num_samples": len(sub_data),
                 "sensitivity": sensitivity,
                 "specificity": specificity,
-                "balanced_accuracy": (sensitivity + specificity) / 2,within each bin was performed.
+                "balanced_accuracy": balanced_accuracy,
             })
         except Exception as e:
             print(f"Error: {e}, {label=}")

@@ -70,6 +70,7 @@ def sample_raster(
         world_to_pixel.to_shapely()
     )
 
+    # Crop the centroids to the raster bounds
     centroid_px = centroid_px.cx[
         0 : meta["width"], # x_min : x_max
         0 : meta["height"], # y_min : y_max

@@ -284,6 +284,7 @@ def get_zonal_statistics(
         stats_out.to_file(gdf_output_path, driver="GPKG")
     return stats_out
 
+
 def create_centroid_identifier(
     bf_dataset: gpd.GeoDataFrame,
     id_column_name: str = "object_id"

@@ -3,7 +3,6 @@ from typing import Union, Tuple, Dict, Any, Optional
 import geopandas as gpd
 import numpy as np
 import shapely
-import hashlib
 
 
 class Dataset_patches:

@@ -33,6 +33,12 @@ class RasterioSampler:
         self.vector_gdf = self._open_vector(vector_dataset)
         self.vector_gdf["centroids"] = self.get_centroids()
 
+    def __del__(self):
+        """
+        Close the raster dataset when the object is deleted.
+        """
+        self.dataset.close()
+
     def _open_vector(self, vector_dataset: Union[str, gpd.GeoDataFrame]) -> gpd.GeoDataFrame:
         """
         Open the vector dataset and transform it to the raster's CRS if needed.
@@ -126,7 +132,7 @@ class RasterioSampler:
                 window = rasterio.windows.Window(col - width // 2, row - height // 2, width, height)
                 band_data = self.dataset.read(band, window=window)
                 mask_data = self.dataset.read_masks(band, window=window)
-                if filter_nodata and (np.any(band_data == self.dataset.nodata) or np.any(mask_data == 0)):
+                if filter_nodata and np.any(mask_data == 0):
                     return None
                 band_values.append(band_data)
             except IndexError:
@@ -248,11 +254,6 @@ class RasterioSampler:
                 index, output_dir=output_dir, filename_prefix=filename_prefix, width=width, height=height, offset_x=offset_x, offset_y=offset_y, bands=bands
             )
 
-    def close(self):
-        """
-        Close the raster dataset to release resources.
-        """
-        self.dataset.close()
 
 # Example usage
 if __name__ == "__main__":
@@ -269,5 +270,3 @@ if __name__ == "__main__":
     # Save patch to output directory
     output_directory = "output_patches"
     sampler.save_patch(0, output_dir=output_directory, filename_prefix="patch")
-
-    sampler.close()
